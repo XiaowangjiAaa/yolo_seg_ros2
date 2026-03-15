@@ -4,19 +4,28 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 
+from ultralytics import YOLO
+import cv2
+
 
 class YoloSegNode(Node):
     def __init__(self):
         super().__init__('yolo_seg_node')
 
-        # 参数：输入和输出话题都可以后面改
-        self.declare_parameter('input_topic', '/camera/rgb/image_raw')
+        self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
         self.declare_parameter('output_topic', '/yolo_result')
+        self.declare_parameter('model_path', 'yolov8n.pt')
+        self.declare_parameter('conf_threshold', 0.4)
 
         self.input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
         self.output_topic = self.get_parameter('output_topic').get_parameter_value().string_value
+        self.model_path = self.get_parameter('model_path').get_parameter_value().string_value
+        self.conf_threshold = self.get_parameter('conf_threshold').get_parameter_value().double_value
 
         self.bridge = CvBridge()
+
+        self.get_logger().info(f'Loading YOLO model from: {self.model_path}')
+        self.model = YOLO(self.model_path)
 
         self.subscription = self.create_subscription(
             Image,
@@ -36,27 +45,31 @@ class YoloSegNode(Node):
         self.get_logger().info('YOLO Seg Node has started.')
         self.get_logger().info(f'Subscribing image topic: {self.input_topic}')
         self.get_logger().info(f'Publishing result topic: {self.output_topic}')
+        self.get_logger().info(f'Confidence threshold: {self.conf_threshold}')
 
     def image_callback(self, msg: Image):
         try:
-            # ROS Image -> OpenCV
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
-            # 这里先不做 YOLO，只做透传
-            # 后面你可以在这里加 YOLO 推理和绘框
-            result_image = cv_image
+            results = self.model.predict(
+                source=cv_image,
+                conf=self.conf_threshold,
+                verbose=False
+            )
 
-            # OpenCV -> ROS Image
-            out_msg = self.bridge.cv2_to_imgmsg(result_image, encoding='bgr8')
+            annotated_frame = results[0].plot()
+
+            out_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding='bgr8')
             out_msg.header = msg.header
-
             self.publisher.publish(out_msg)
 
             self.frame_count += 1
-            if self.frame_count % 30 == 0:
-                h, w = result_image.shape[:2]
+            if self.frame_count % 10 == 0:
+                num_boxes = 0
+                if results[0].boxes is not None:
+                    num_boxes = len(results[0].boxes)
                 self.get_logger().info(
-                    f'Received and republished {self.frame_count} frames, image size: {w}x{h}'
+                    f'Processed {self.frame_count} frames, detections: {num_boxes}'
                 )
 
         except CvBridgeError as e:
