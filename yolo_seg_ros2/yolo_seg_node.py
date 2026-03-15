@@ -5,7 +5,6 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 
 from ultralytics import YOLO
-import cv2
 
 
 class YoloSegNode(Node):
@@ -14,8 +13,8 @@ class YoloSegNode(Node):
 
         self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
         self.declare_parameter('output_topic', '/yolo_result')
-        self.declare_parameter('model_path', 'yolov8n.pt')
-        self.declare_parameter('conf_threshold', 0.4)
+        self.declare_parameter('model_path', '/home/ubuntu/yolov8n-seg.pt')
+        self.declare_parameter('conf_threshold', 0.25)
 
         self.input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
         self.output_topic = self.get_parameter('output_topic').get_parameter_value().string_value
@@ -24,7 +23,7 @@ class YoloSegNode(Node):
 
         self.bridge = CvBridge()
 
-        self.get_logger().info(f'Loading YOLO model from: {self.model_path}')
+        self.get_logger().info(f'Loading segmentation model: {self.model_path}')
         self.model = YOLO(self.model_path)
 
         self.subscription = self.create_subscription(
@@ -57,6 +56,7 @@ class YoloSegNode(Node):
                 verbose=False
             )
 
+            # 自动绘制 segmentation mask + box + label
             annotated_frame = results[0].plot()
 
             out_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding='bgr8')
@@ -65,11 +65,11 @@ class YoloSegNode(Node):
 
             self.frame_count += 1
             if self.frame_count % 10 == 0:
-                num_boxes = 0
-                if results[0].boxes is not None:
-                    num_boxes = len(results[0].boxes)
+                num_masks = 0
+                if results[0].masks is not None:
+                    num_masks = len(results[0].masks)
                 self.get_logger().info(
-                    f'Processed {self.frame_count} frames, detections: {num_boxes}'
+                    f'Processed {self.frame_count} frames, segment objects: {num_masks}'
                 )
 
         except CvBridgeError as e:
