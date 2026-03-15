@@ -15,16 +15,22 @@ class YoloSegNode(Node):
 
         self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
         self.declare_parameter('output_topic', '/yolo_result')
-        self.declare_parameter('model_path', '/home/ubuntu/yolov8n-seg.pt')
+
+        # 改成 NCNN 导出目录，而不是 .pt 文件
+        self.declare_parameter('model_path', '/home/ubuntu/yolov8n-seg_ncnn_model')
+        self.declare_parameter('is_ncnn', True)
+
         self.declare_parameter('conf_threshold', 0.25)
         self.declare_parameter('imgsz', 320)
-        self.declare_parameter('process_fps', 5.0)      # YOLO处理频率
-        self.declare_parameter('skip_frames', 0)        # 额外跳帧，0表示不跳
+        self.declare_parameter('process_fps', 5.0)
+        self.declare_parameter('skip_frames', 0)
         self.declare_parameter('max_det', 10)
 
         self.input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
         self.output_topic = self.get_parameter('output_topic').get_parameter_value().string_value
         self.model_path = self.get_parameter('model_path').get_parameter_value().string_value
+        self.is_ncnn = self.get_parameter('is_ncnn').get_parameter_value().bool_value
+
         self.conf_threshold = self.get_parameter('conf_threshold').get_parameter_value().double_value
         self.imgsz = self.get_parameter('imgsz').get_parameter_value().integer_value
         self.process_fps = self.get_parameter('process_fps').get_parameter_value().double_value
@@ -33,7 +39,8 @@ class YoloSegNode(Node):
 
         self.bridge = CvBridge()
 
-        self.get_logger().info(f'Loading segmentation model: {self.model_path}')
+        backend_name = 'NCNN' if self.is_ncnn else 'PyTorch'
+        self.get_logger().info(f'Loading {backend_name} segmentation model: {self.model_path}')
         self.model = YOLO(self.model_path)
 
         sub_qos = QoSProfile(
@@ -74,6 +81,7 @@ class YoloSegNode(Node):
         self.get_logger().info('YOLO Seg Node has started.')
         self.get_logger().info(f'Subscribing image topic: {self.input_topic}')
         self.get_logger().info(f'Publishing result topic: {self.output_topic}')
+        self.get_logger().info(f'Backend: {backend_name}')
         self.get_logger().info(f'Confidence threshold: {self.conf_threshold}')
         self.get_logger().info(f'imgsz: {self.imgsz}')
         self.get_logger().info(f'process_fps: {self.process_fps}')
