@@ -8,6 +8,10 @@ def generate_launch_description():
             package='yolo_seg_ros2',
             executable='yolo_seg_node',
             name='yolo_seg_node',
-            output='screen'
+            output='screen',
+            parameters=[
+                {'input_topic': '/camera/rgb/image_raw'},
+                {'output_topic': '/yolo_result'},
+            ]
         )
     ])
