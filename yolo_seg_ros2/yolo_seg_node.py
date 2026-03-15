@@ -241,7 +241,7 @@ class YoloSegNode(Node):
                             label_text = 'N/A'
 
                         # 画中心点
-                        cv2.circle(annotated_frame, (cx, cy), 4, (0, 255, 255), -1)
+                        #cv2.circle(annotated_frame, (cx, cy), 4, (0, 255, 255), -1)
 
                         # 画距离文字
                         self.draw_distance_label(annotated_frame, x1, y1, label_text)
