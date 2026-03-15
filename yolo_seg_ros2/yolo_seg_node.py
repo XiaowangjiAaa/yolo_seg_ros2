@@ -36,8 +36,14 @@ class YoloSegNode(Node):
         self.get_logger().info(f'Loading segmentation model: {self.model_path}')
         self.model = YOLO(self.model_path)
 
-        qos = QoSProfile(
+        sub_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
+        pub_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
@@ -46,13 +52,13 @@ class YoloSegNode(Node):
             Image,
             self.input_topic,
             self.image_callback,
-            qos
+            sub_qos
         )
 
         self.publisher = self.create_publisher(
             Image,
             self.output_topic,
-            qos
+            pub_qos
         )
 
         self.latest_msg = None
