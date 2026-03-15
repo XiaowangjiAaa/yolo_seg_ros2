@@ -1,5 +1,7 @@
+import threading
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
@@ -15,67 +17,122 @@ class YoloSegNode(Node):
         self.declare_parameter('output_topic', '/yolo_result')
         self.declare_parameter('model_path', '/home/ubuntu/yolov8n-seg.pt')
         self.declare_parameter('conf_threshold', 0.25)
+        self.declare_parameter('imgsz', 320)
+        self.declare_parameter('process_fps', 5.0)      # YOLO处理频率
+        self.declare_parameter('skip_frames', 0)        # 额外跳帧，0表示不跳
+        self.declare_parameter('max_det', 10)
 
         self.input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
         self.output_topic = self.get_parameter('output_topic').get_parameter_value().string_value
         self.model_path = self.get_parameter('model_path').get_parameter_value().string_value
         self.conf_threshold = self.get_parameter('conf_threshold').get_parameter_value().double_value
+        self.imgsz = self.get_parameter('imgsz').get_parameter_value().integer_value
+        self.process_fps = self.get_parameter('process_fps').get_parameter_value().double_value
+        self.skip_frames = self.get_parameter('skip_frames').get_parameter_value().integer_value
+        self.max_det = self.get_parameter('max_det').get_parameter_value().integer_value
 
         self.bridge = CvBridge()
 
         self.get_logger().info(f'Loading segmentation model: {self.model_path}')
         self.model = YOLO(self.model_path)
 
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
         self.subscription = self.create_subscription(
             Image,
             self.input_topic,
             self.image_callback,
-            10
+            qos
         )
 
         self.publisher = self.create_publisher(
             Image,
             self.output_topic,
-            10
+            qos
         )
 
-        self.frame_count = 0
+        self.latest_msg = None
+        self.latest_frame = None
+        self.frame_lock = threading.Lock()
+        self.processing = False
+        self.received_count = 0
+        self.processed_count = 0
+
+        timer_period = 1.0 / max(self.process_fps, 0.1)
+        self.timer = self.create_timer(timer_period, self.process_latest_frame)
 
         self.get_logger().info('YOLO Seg Node has started.')
         self.get_logger().info(f'Subscribing image topic: {self.input_topic}')
         self.get_logger().info(f'Publishing result topic: {self.output_topic}')
         self.get_logger().info(f'Confidence threshold: {self.conf_threshold}')
+        self.get_logger().info(f'imgsz: {self.imgsz}')
+        self.get_logger().info(f'process_fps: {self.process_fps}')
+        self.get_logger().info(f'skip_frames: {self.skip_frames}')
+        self.get_logger().info(f'max_det: {self.max_det}')
 
     def image_callback(self, msg: Image):
+        self.received_count += 1
+
+        if self.skip_frames > 0 and (self.received_count % (self.skip_frames + 1) != 1):
+            return
+
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            with self.frame_lock:
+                self.latest_msg = msg
+                self.latest_frame = cv_image
+        except CvBridgeError as e:
+            self.get_logger().error(f'CvBridge error: {e}')
+        except Exception as e:
+            self.get_logger().error(f'Unexpected error in image_callback: {e}')
 
+    def process_latest_frame(self):
+        if self.processing:
+            return
+
+        with self.frame_lock:
+            if self.latest_frame is None or self.latest_msg is None:
+                return
+            frame = self.latest_frame.copy()
+            msg = self.latest_msg
+            self.latest_frame = None
+            self.latest_msg = None
+
+        self.processing = True
+        try:
             results = self.model.predict(
-                source=cv_image,
+                source=frame,
                 conf=self.conf_threshold,
+                imgsz=self.imgsz,
+                max_det=self.max_det,
                 verbose=False
             )
 
-            # 自动绘制 segmentation mask + box + label
             annotated_frame = results[0].plot()
 
             out_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding='bgr8')
             out_msg.header = msg.header
             self.publisher.publish(out_msg)
 
-            self.frame_count += 1
-            if self.frame_count % 10 == 0:
+            self.processed_count += 1
+
+            if self.processed_count % 10 == 0:
                 num_masks = 0
                 if results[0].masks is not None:
                     num_masks = len(results[0].masks)
+
                 self.get_logger().info(
-                    f'Processed {self.frame_count} frames, segment objects: {num_masks}'
+                    f'received={self.received_count}, processed={self.processed_count}, segment_objects={num_masks}'
                 )
 
-        except CvBridgeError as e:
-            self.get_logger().error(f'CvBridge error: {e}')
         except Exception as e:
-            self.get_logger().error(f'Unexpected error in image_callback: {e}')
+            self.get_logger().error(f'Unexpected error in process_latest_frame: {e}')
+        finally:
+            self.processing = False
 
 
 def main(args=None):
