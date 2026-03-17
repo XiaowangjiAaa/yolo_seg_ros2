@@ -195,25 +195,22 @@ class YoloSegNode(Node):
             self.processing = False
 
     def draw_measurement_board(self, img, m):
-        """显示物理尺寸看板"""
-        # 黑色半透明背景
-        cv2.rectangle(img, (15, 15), (320, 180), (0, 0, 0), -1)
-        cv2.addWeighted(img, 0.75, img, 0.25, 0, img)
-
-        color = (0, 255, 0)
+        """简洁版显示看板：无背景，无底部提示行"""
+        color = (0, 255, 0)  # 绿色
+        white = (255, 255, 255)  # 白色
         f = cv2.FONT_HERSHEY_SIMPLEX
 
-        # 标题
-        cv2.putText(img, f"Distance: {m['distance_m']:.2f} m", (25, 45), f, 0.7, (255, 255, 255), 2)
-        cv2.line(img, (25, 55), (310, 55), (100, 100, 100), 1)
+        # 1. 距离显示 (白字)
+        cv2.putText(img, f"Distance: {m['distance_m']:.2f} m", (25, 45), f, 0.7, white, 2, cv2.LINE_AA)
 
-        # 物理尺寸 (mm)
-        cv2.putText(img, f"Length: {m['length_mm']:.1f} mm", (25, 85), f, 0.6, color, 1)
-        cv2.putText(img, f"Avg Width: {m['avg_width_mm']:.2f} mm", (25, 115), f, 0.6, color, 1)
-        cv2.putText(img, f"Max Width: {m['max_width_mm']:.2f} mm", (25, 145), f, 0.6, color, 1)
+        # 绘制一条装饰性的分割线（可选，如果想全屏最简可以删掉下面这行）
+        cv2.line(img, (25, 55), (280, 55), (150, 150, 150), 1)
 
-        # 底部提示小字
-        cv2.putText(img, "Unit: Real-world Metric (mm)", (25, 170), f, 0.4, (150, 150, 150), 1)
+        # 2. 物理尺寸显示 (绿字)
+        # 增加了粗细和抗锯齿，确保在无背景时也清晰
+        cv2.putText(img, f"Length: {m['length_mm']:.1f} mm", (25, 85), f, 0.6, color, 2, cv2.LINE_AA)
+        cv2.putText(img, f"Avg Width: {m['avg_width_mm']:.2f} mm", (25, 115), f, 0.6, color, 2, cv2.LINE_AA)
+        cv2.putText(img, f"Max Width: {m['max_width_mm']:.2f} mm", (25, 145), f, 0.6, color, 2, cv2.LINE_AA)
 
 
 def main(args=None):
