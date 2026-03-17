@@ -1,6 +1,7 @@
 import threading
 import cv2
 import numpy as np
+import os
 
 import rclpy
 from rclpy.node import Node
@@ -19,7 +20,13 @@ class YoloSegNode(Node):
         self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
         self.declare_parameter('depth_topic', '/ascamera/camera_publisher/depth0/image_raw')
         self.declare_parameter('output_topic', '/yolo_result')
-        self.declare_parameter('model_path', '/home/ubuntu/yolov8n-seg.pt')
+
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        package_root = os.path.dirname(current_dir)
+        default_model_path = os.path.join(package_root, 'YOLO_26n_crack.pt')
+        self.declare_parameter('model_path', default_model_path)
+
+        #self.declare_parameter('model_path', '/home/ubuntu/yolov8n-seg.pt')
         self.declare_parameter('conf_threshold', 0.25)
         self.declare_parameter('imgsz', 320)
         self.declare_parameter('process_fps', 5.0)
