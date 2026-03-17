@@ -13,7 +13,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/yolo_seg.launch.py']),
         # --- 添加下面这一行，将权重文件安装到 share 目录 ---
-        ('share/' + package_name, ['YOLO_26n_crack.pt']),
+        ('share/' + package_name, ['yolo26n-seg.pt']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

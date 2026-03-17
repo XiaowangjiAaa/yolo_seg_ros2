@@ -1,10 +1,6 @@
 import threading
 import cv2
 import numpy as np
-import os
-import time
-import queue
-from collections import deque
 
 import rclpy
 from rclpy.node import Node
@@ -13,7 +9,6 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 
-from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 
 
@@ -21,196 +16,255 @@ class YoloSegNode(Node):
     def __init__(self):
         super().__init__('yolo_seg_node')
 
-        # --- 1. 参数声明 ---
         self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
         self.declare_parameter('depth_topic', '/ascamera/camera_publisher/depth0/image_raw')
         self.declare_parameter('output_topic', '/yolo_result')
-
-        # 相机焦距 (Pixel)，请根据你的相机内参修改。如果不确定，320-640 是常用范围
-        self.declare_parameter('focal_length_px', 500.0)
-
-        try:
-            package_share_dir = get_package_share_directory('yolo_seg_ros2')
-            default_model_path = os.path.join(package_share_dir, 'YOLO_26n_crack.pt')
-        except Exception:
-            default_model_path = 'YOLO_26n_crack.pt'
-
-        self.declare_parameter('model_path', default_model_path)
+        self.declare_parameter('model_path', '/home/ubuntu/yolov26n-seg.pt')
         self.declare_parameter('conf_threshold', 0.25)
         self.declare_parameter('imgsz', 320)
         self.declare_parameter('process_fps', 5.0)
-        self.declare_parameter('smooth_win', 5)
+        self.declare_parameter('skip_frames', 0)
+        self.declare_parameter('max_det', 10)
 
-        # 获取参数
-        self.f_px = self.get_parameter('focal_length_px').value
-        self.model_path = self.get_parameter('model_path').value
-        self.conf_threshold = self.get_parameter('conf_threshold').value
-        self.imgsz = self.get_parameter('imgsz').value
+        # 深度测距参数
+        self.declare_parameter('depth_patch_radius', 2)   # 中心点周围 patch 半径，2 表示 5x5
+        self.declare_parameter('min_depth_mm', 100)       # 过滤过近无效值
+        self.declare_parameter('max_depth_mm', 10000)     # 过滤过远无效值
 
-        # --- 2. 初始化 ---
+        self.input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
+        self.depth_topic = self.get_parameter('depth_topic').get_parameter_value().string_value
+        self.output_topic = self.get_parameter('output_topic').get_parameter_value().string_value
+        self.model_path = self.get_parameter('model_path').get_parameter_value().string_value
+        self.conf_threshold = self.get_parameter('conf_threshold').get_parameter_value().double_value
+        self.imgsz = self.get_parameter('imgsz').get_parameter_value().integer_value
+        self.process_fps = self.get_parameter('process_fps').get_parameter_value().double_value
+        self.skip_frames = self.get_parameter('skip_frames').get_parameter_value().integer_value
+        self.max_det = self.get_parameter('max_det').get_parameter_value().integer_value
+
+        self.depth_patch_radius = self.get_parameter('depth_patch_radius').get_parameter_value().integer_value
+        self.min_depth_mm = self.get_parameter('min_depth_mm').get_parameter_value().integer_value
+        self.max_depth_mm = self.get_parameter('max_depth_mm').get_parameter_value().integer_value
+
         self.bridge = CvBridge()
+
+        self.get_logger().info(f'Loading segmentation model: {self.model_path}')
         self.model = YOLO(self.model_path)
 
-        # 量化数据：增加物理尺寸字段
-        self.latest_metrics = {
-            "area_px": 0, "length_px": 0, "avg_width_px": 0.0, "max_width_px": 0.0,
-            "length_mm": 0.0, "avg_width_mm": 0.0, "max_width_mm": 0.0, "distance_m": 0.0
-        }
-        self.hist_metrics = {k: deque(maxlen=self.get_parameter('smooth_win').value) for k in
-                             self.latest_metrics.keys()}
+        # RGB / Depth 输入用低延迟 QoS
+        sub_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
 
-        self.task_q = queue.Queue(maxsize=2)
-        self.stop_event = threading.Event()
-        self.quant_thread = threading.Thread(target=self.quant_worker, daemon=True)
-        self.quant_thread.start()
+        # 输出给浏览器/显示端用 RELIABLE
+        pub_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
+        self.subscription = self.create_subscription(
+            Image,
+            self.input_topic,
+            self.image_callback,
+            sub_qos
+        )
+
+        self.depth_subscription = self.create_subscription(
+            Image,
+            self.depth_topic,
+            self.depth_callback,
+            sub_qos
+        )
+
+        self.publisher = self.create_publisher(
+            Image,
+            self.output_topic,
+            pub_qos
+        )
+
+        self.latest_msg = None
+        self.latest_frame = None
+        self.latest_depth_msg = None
+        self.latest_depth_frame = None
 
         self.frame_lock = threading.Lock()
-        self.latest_frame = None
-        self.latest_depth_frame = None
-        self.latest_msg = None
         self.processing = False
+        self.received_count = 0
+        self.processed_count = 0
 
-        # --- 3. ROS 订阅发布 ---
-        sub_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
-        self.create_subscription(Image, self.get_parameter('input_topic').value, self.image_callback, sub_qos)
-        self.create_subscription(Image, self.get_parameter('depth_topic').value, self.depth_callback, sub_qos)
-        self.publisher = self.create_publisher(Image, self.get_parameter('output_topic').value, 10)
-
-        timer_period = 1.0 / max(self.get_parameter('process_fps').value, 0.1)
+        timer_period = 1.0 / max(self.process_fps, 0.1)
         self.timer = self.create_timer(timer_period, self.process_latest_frame)
 
-        self.get_logger().info('YOLO Real-World Measurement Node Started.')
+        self.get_logger().info('YOLO Seg Depth Node has started.')
+        self.get_logger().info(f'Subscribing RGB topic: {self.input_topic}')
+        self.get_logger().info(f'Subscribing Depth topic: {self.depth_topic}')
+        self.get_logger().info(f'Publishing result topic: {self.output_topic}')
+        self.get_logger().info(f'Confidence threshold: {self.conf_threshold}')
+        self.get_logger().info(f'imgsz: {self.imgsz}')
+        self.get_logger().info(f'process_fps: {self.process_fps}')
+        self.get_logger().info(f'skip_frames: {self.skip_frames}')
+        self.get_logger().info(f'max_det: {self.max_det}')
+        self.get_logger().info(f'depth_patch_radius: {self.depth_patch_radius}')
+        self.get_logger().info(f'min_depth_mm: {self.min_depth_mm}')
+        self.get_logger().info(f'max_depth_mm: {self.max_depth_mm}')
 
-    # ===========================
-    # 核心量化工作线程
-    # ===========================
-    def quant_worker(self):
-        while not self.stop_event.is_set():
-            try:
-                # 获取任务：mask 和 对应的平均深度值
-                mask01, dist_mm = self.task_q.get(timeout=0.2)
+    def image_callback(self, msg: Image):
+        self.received_count += 1
 
-                # 1. 计算像素指标
-                m = self.calculate_pixel_metrics(mask01)
+        if self.skip_frames > 0 and (self.received_count % (self.skip_frames + 1) != 1):
+            return
 
-                # 2. 物理换算 (基于当前深度)
-                # 换算比例系数: mm/px = 距离 / 焦距
-                if dist_mm > 0:
-                    px_to_mm = float(dist_mm) / self.f_px
-                    m["length_mm"] = m["length_px"] * px_to_mm
-                    m["avg_width_mm"] = m["avg_width_px"] * px_to_mm
-                    m["max_width_mm"] = m["max_width_px"] * px_to_mm
-                    m["distance_m"] = dist_mm / 1000.0
-                else:
-                    m["length_mm"] = m["avg_width_mm"] = m["max_width_mm"] = m["distance_m"] = 0.0
-
-                # 3. 更新平滑队列
-                with self.frame_lock:
-                    for k, v in m.items():
-                        self.hist_metrics[k].append(v)
-                        self.latest_metrics[k] = float(np.mean(self.hist_metrics[k]))
-
-                self.task_q.task_done()
-            except queue.Empty:
-                continue
-
-    def calculate_pixel_metrics(self, mask01):
-        area_px = int(mask01.sum())
-        if area_px <= 0:
-            return {"area_px": 0, "length_px": 0, "avg_width_px": 0.0, "max_width_px": 0.0}
-
-        dist_map = cv2.distanceTransform(mask01, cv2.DIST_L2, 3)
-        max_w_px = 2.0 * float(dist_map.max())
-
-        length_px = 0
-        if hasattr(cv2, 'ximgproc'):
-            skeleton = cv2.ximgproc.thinning((mask01 * 255).astype(np.uint8))
-            length_px = int((skeleton > 0).sum())
-        else:
-            contours, _ = cv2.findContours(mask01, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for cnt in contours: length_px += cv2.arcLength(cnt, True) / 2.0
-
-        avg_w_px = float(area_px) / float(length_px + 1e-6)
-        return {"area_px": area_px, "length_px": int(length_px), "avg_width_px": avg_w_px, "max_width_px": max_w_px}
-
-    # ===========================
-    # 图像回调
-    # ===========================
-    def image_callback(self, msg):
         try:
-            cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             with self.frame_lock:
-                self.latest_frame, self.latest_msg = cv_img, msg
+                self.latest_msg = msg
+                self.latest_frame = cv_image
+        except CvBridgeError as e:
+            self.get_logger().error(f'RGB CvBridge error: {e}')
         except Exception as e:
-            self.get_logger().error(f'RGB Err: {e}')
+            self.get_logger().error(f'Unexpected error in image_callback: {e}')
 
-    def depth_callback(self, msg):
+    def depth_callback(self, msg: Image):
         try:
-            self.latest_depth_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            # 保持原始深度格式，当前已知是 16UC1
+            depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            with self.frame_lock:
+                self.latest_depth_msg = msg
+                self.latest_depth_frame = depth_image
+        except CvBridgeError as e:
+            self.get_logger().error(f'Depth CvBridge error: {e}')
         except Exception as e:
-            self.get_logger().error(f'Depth Err: {e}')
+            self.get_logger().error(f'Unexpected error in depth_callback: {e}')
+
+    def get_depth_median_mm(self, depth, cx, cy, k=2):
+        """
+        从深度图中取中心点附近小区域的有效深度中位数
+        depth: 16UC1, 单位 mm
+        """
+        h, w = depth.shape[:2]
+
+        x1 = max(0, cx - k)
+        x2 = min(w, cx + k + 1)
+        y1 = max(0, cy - k)
+        y2 = min(h, cy + k + 1)
+
+        patch = depth[y1:y2, x1:x2]
+
+        # 过滤无效值和异常值
+        valid = patch[(patch > self.min_depth_mm) & (patch < self.max_depth_mm)]
+
+        if valid.size == 0:
+            return None
+
+        return float(np.median(valid))
+
+    def draw_distance_label(self, image, x1, y1, text):
+        text_x = max(5, x1)
+        text_y = max(20, y1 - 10)
+
+        # 先画黑底再画绿字，更清楚
+        cv2.putText(
+            image,
+            text,
+            (text_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            4,
+            cv2.LINE_AA
+        )
+        cv2.putText(
+            image,
+            text,
+            (text_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA
+        )
 
     def process_latest_frame(self):
-        if self.processing or self.latest_frame is None: return
+        if self.processing:
+            return
 
         with self.frame_lock:
-            frame, depth = self.latest_frame.copy(), (
-                self.latest_depth_frame.copy() if self.latest_depth_frame is not None else None)
-            msg, m_display = self.latest_msg, self.latest_metrics.copy()
+            if self.latest_frame is None or self.latest_msg is None:
+                return
+            if self.latest_depth_frame is None:
+                return
+
+            frame = self.latest_frame.copy()
+            depth = self.latest_depth_frame.copy()
+            msg = self.latest_msg
+
+            # 清空 RGB 缓存，保留最新深度缓存供下次继续用也可以；
+            # 这里 RGB 清空避免重复处理旧帧
             self.latest_frame = None
+            self.latest_msg = None
 
         self.processing = True
         try:
-            results = self.model.predict(source=frame, conf=self.conf_threshold, imgsz=self.imgsz, verbose=False)
-            h, w = frame.shape[:2]
+            results = self.model.predict(
+                source=frame,
+                conf=self.conf_threshold,
+                imgsz=self.imgsz,
+                max_det=self.max_det,
+                verbose=False
+            )
 
-            # --- 提取 Mask 并计算该区域的平均距离 ---
-            if results[0].masks is not None and len(results[0].masks) > 0 and depth is not None:
-                combined_mask = np.zeros((h, w), dtype=np.uint8)
-                masks_data = results[0].masks.data.cpu().numpy()
-                for m in masks_data:
-                    m_resized = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
-                    combined_mask = np.maximum(combined_mask, (m_resized > 0.5).astype(np.uint8))
-
-                # 获取 Mask 区域内的深度中值（mm）
-                mask_depths = depth[combined_mask > 0]
-                valid_depths = mask_depths[(mask_depths > 100) & (mask_depths < 10000)]
-                avg_dist = np.median(valid_depths) if valid_depths.size > 0 else 0.0
-
-                if not self.task_q.full(): self.task_q.put_nowait((combined_mask, avg_dist))
-            else:
-                if not self.task_q.full(): self.task_q.put_nowait((np.zeros((h, w), dtype=np.uint8), 0.0))
-
-            # --- 绘制 UI (移除 FPS) ---
             annotated_frame = results[0].plot()
-            self.draw_measurement_board(annotated_frame, m_display)
+
+            # 读取检测框并测距
+            if results[0].boxes is not None and len(results[0].boxes) > 0:
+                for box in results[0].boxes:
+                    xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                    x1, y1, x2, y2 = xyxy.tolist()
+
+                    cx = (x1 + x2) // 2
+                    cy = (y1 + y2) // 2
+
+                    if 0 <= cx < depth.shape[1] and 0 <= cy < depth.shape[0]:
+                        depth_mm = self.get_depth_median_mm(
+                            depth,
+                            cx,
+                            cy,
+                            k=self.depth_patch_radius
+                        )
+
+                        if depth_mm is not None:
+                            distance_m = depth_mm / 1000.0
+                            label_text = f'{distance_m:.2f} m'
+                        else:
+                            label_text = 'N/A'
+
+                        # 画中心点
+                        #cv2.circle(annotated_frame, (cx, cy), 4, (0, 255, 255), -1)
+
+                        # 画距离文字
+                        self.draw_distance_label(annotated_frame, x1, y1, label_text)
 
             out_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding='bgr8')
             out_msg.header = msg.header
             self.publisher.publish(out_msg)
 
+            self.processed_count += 1
+
+            if self.processed_count % 10 == 0:
+                num_masks = 0
+                if results[0].masks is not None:
+                    num_masks = len(results[0].masks)
+
+                self.get_logger().info(
+                    f'received={self.received_count}, processed={self.processed_count}, segment_objects={num_masks}'
+                )
+
         except Exception as e:
-            self.get_logger().error(f'Loop Err: {e}')
+            self.get_logger().error(f'Unexpected error in process_latest_frame: {e}')
         finally:
             self.processing = False
-
-    def draw_measurement_board(self, img, m):
-        """简洁版显示看板：无背景，无底部提示行"""
-        color = (0, 255, 0)  # 绿色
-        white = (255, 255, 255)  # 白色
-        f = cv2.FONT_HERSHEY_SIMPLEX
-
-        # 1. 距离显示 (白字)
-        cv2.putText(img, f"Distance: {m['distance_m']:.2f} m", (25, 45), f, 0.7, white, 2, cv2.LINE_AA)
-
-        # 绘制一条装饰性的分割线（可选，如果想全屏最简可以删掉下面这行）
-        cv2.line(img, (25, 55), (280, 55), (150, 150, 150), 1)
-
-        # 2. 物理尺寸显示 (绿字)
-        # 增加了粗细和抗锯齿，确保在无背景时也清晰
-        cv2.putText(img, f"Length: {m['length_mm']:.1f} mm", (25, 85), f, 0.6, color, 2, cv2.LINE_AA)
-        cv2.putText(img, f"Avg Width: {m['avg_width_mm']:.2f} mm", (25, 115), f, 0.6, color, 2, cv2.LINE_AA)
-        cv2.putText(img, f"Max Width: {m['max_width_mm']:.2f} mm", (25, 145), f, 0.6, color, 2, cv2.LINE_AA)
 
 
 def main(args=None):
@@ -219,7 +273,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.stop_event.set()
+        node.get_logger().info('Shutting down yolo_seg_node...')
     finally:
         node.destroy_node()
         rclpy.shutdown()
