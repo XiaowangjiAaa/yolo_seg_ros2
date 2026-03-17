@@ -1,4 +1,5 @@
 from setuptools import setup
+import os # 建议导入 os 以便后续扩展
 
 package_name = 'yolo_seg_ros2'
 
@@ -11,6 +12,8 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/yolo_seg.launch.py']),
+        # --- 添加下面这一行，将权重文件安装到 share 目录 ---
+        ('share/' + package_name, ['YOLO_26n_crack.pt']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
