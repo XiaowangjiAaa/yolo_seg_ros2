@@ -52,6 +52,21 @@ class YoloSegNode(Node):
     def image_callback(self, msg: Image):
         self.publisher.publish(msg)
 
+def main(args=None):
+    rclpy.init(args=args)
+    node = YoloSegNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('Shutting down yolo_seg_node...')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
 # class YoloSegNode(Node):
 #     def __init__(self):
 #         super().__init__('yolo_seg_node')
