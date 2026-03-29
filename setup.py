@@ -23,7 +23,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'yolo_seg_node = yolo_seg_ros2.yolo_seg_node:main',
+            'image_relay_node = yolo_seg_ros2.image_relay_node:main',
         ],
     },
 )
