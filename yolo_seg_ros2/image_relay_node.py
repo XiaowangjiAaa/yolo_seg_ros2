@@ -9,13 +9,19 @@ class ImageRelayNode(Node):
         super().__init__('image_relay_node')
 
         self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
-        self.declare_parameter('output_topic', '/yolo_result')
+        self.declare_parameter('output_topic', '/rgb_relay')
 
         input_topic = self.get_parameter('input_topic').value
         output_topic = self.get_parameter('output_topic').value
 
-        qos = QoSProfile(
+        sub_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
+        pub_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
@@ -24,13 +30,13 @@ class ImageRelayNode(Node):
             Image,
             input_topic,
             self.image_callback,
-            qos
+            sub_qos
         )
 
         self.publisher = self.create_publisher(
             Image,
             output_topic,
-            qos
+            pub_qos
         )
 
         self.get_logger().info(f'Relaying {input_topic} -> {output_topic}')
