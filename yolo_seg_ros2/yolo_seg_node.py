@@ -1,6 +1,6 @@
 import threading
+import time
 import cv2
-import numpy as np
 
 import rclpy
 from rclpy.node import Node
@@ -14,13 +14,30 @@ from ultralytics import YOLO
 
 class YoloSegNode(Node):
     def __init__(self):
-        super().__init__('image_relay_node')
+        super().__init__('yolo_seg_ncnn_node')
 
         self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
         self.declare_parameter('output_topic', '/yolo_result')
+        self.declare_parameter('model_path', '/home/ubuntu/ros2_ws/src/yolo_seg_ros2/models/YOLO_26n_crack_ncnn_model')
+        self.declare_parameter('conf_threshold', 0.25)
+        self.declare_parameter('imgsz', 320)
+        self.declare_parameter('process_fps', 5.0)
+        self.declare_parameter('draw_masks', True)
+        self.declare_parameter('max_det', 10)
 
-        input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
-        output_topic = self.get_parameter('output_topic').get_parameter_value().string_value
+        self.input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
+        self.output_topic = self.get_parameter('output_topic').get_parameter_value().string_value
+        self.model_path = self.get_parameter('model_path').get_parameter_value().string_value
+        self.conf_threshold = self.get_parameter('conf_threshold').get_parameter_value().double_value
+        self.imgsz = self.get_parameter('imgsz').get_parameter_value().integer_value
+        self.process_fps = self.get_parameter('process_fps').get_parameter_value().double_value
+        self.draw_masks = self.get_parameter('draw_masks').get_parameter_value().bool_value
+        self.max_det = self.get_parameter('max_det').get_parameter_value().integer_value
+
+        self.bridge = CvBridge()
+
+        self.get_logger().info(f'Loading NCNN model from: {self.model_path}')
+        self.model = YOLO(self.model_path)
 
         sub_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -29,28 +46,109 @@ class YoloSegNode(Node):
         )
 
         pub_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
 
         self.subscription = self.create_subscription(
             Image,
-            input_topic,
+            self.input_topic,
             self.image_callback,
             sub_qos
         )
 
         self.publisher = self.create_publisher(
             Image,
-            output_topic,
+            self.output_topic,
             pub_qos
         )
 
-        self.get_logger().info(f'Relaying {input_topic} → {output_topic}')
+        self.frame_lock = threading.Lock()
+        self.latest_msg = None
+        self.latest_frame = None
+
+        self.last_annotated_frame = None
+        self.last_infer_time = 0.0
+        self.processing = False
+
+        timer_period = 1.0 / max(self.process_fps, 0.1)
+        self.timer = self.create_timer(timer_period, self.process_latest_frame)
+
+        self.get_logger().info(f'Subscribing: {self.input_topic}')
+        self.get_logger().info(f'Publishing:  {self.output_topic}')
+        self.get_logger().info(f'process_fps: {self.process_fps}')
+        self.get_logger().info(f'imgsz:       {self.imgsz}')
+        self.get_logger().info('NCNN node started.')
 
     def image_callback(self, msg: Image):
-        self.publisher.publish(msg)
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            with self.frame_lock:
+                self.latest_msg = msg
+                self.latest_frame = frame
+        except CvBridgeError as e:
+            self.get_logger().error(f'CvBridge error: {e}')
+        except Exception as e:
+            self.get_logger().error(f'image_callback error: {e}')
+
+    def process_latest_frame(self):
+        if self.processing:
+            return
+
+        with self.frame_lock:
+            if self.latest_frame is None or self.latest_msg is None:
+                return
+            frame = self.latest_frame.copy()
+            msg = self.latest_msg
+
+        self.processing = True
+        try:
+            results = self.model.predict(
+                source=frame,
+                conf=self.conf_threshold,
+                imgsz=self.imgsz,
+                max_det=self.max_det,
+                verbose=False
+            )
+
+            result = results[0]
+
+            if self.draw_masks:
+                annotated = result.plot()
+            else:
+                annotated = frame.copy()
+                if result.boxes is not None:
+                    boxes_xyxy = result.boxes.xyxy.cpu().numpy().astype(int)
+                    confs = result.boxes.conf.cpu().numpy()
+                    clss = result.boxes.cls.cpu().numpy().astype(int)
+
+                    for (x1, y1, x2, y2), conf, cls_id in zip(boxes_xyxy, confs, clss):
+                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        label = f'{cls_id}:{conf:.2f}'
+                        cv2.putText(
+                            annotated,
+                            label,
+                            (x1, max(20, y1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (0, 255, 0),
+                            2,
+                            cv2.LINE_AA
+                        )
+
+            self.last_annotated_frame = annotated
+            self.last_infer_time = time.time()
+
+            out_msg = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
+            out_msg.header = msg.header
+            self.publisher.publish(out_msg)
+
+        except Exception as e:
+            self.get_logger().error(f'process_latest_frame error: {e}')
+        finally:
+            self.processing = False
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -58,7 +156,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info('Shutting down yolo_seg_node...')
+        node.get_logger().info('Shutting down yolo_seg_ncnn_node...')
     finally:
         node.destroy_node()
         rclpy.shutdown()
@@ -66,7 +164,6 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
 # class YoloSegNode(Node):
 #     def __init__(self):
 #         super().__init__('yolo_seg_node')
