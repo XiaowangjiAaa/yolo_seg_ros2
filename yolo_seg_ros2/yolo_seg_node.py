@@ -18,7 +18,7 @@ class YoloSegNode(Node):
 
         self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
         self.declare_parameter('output_topic', '/yolo_result')
-        self.declare_parameter('model_path', '/home/ubuntu/ros2_ws/src/yolo_seg_ros2/models/YOLO_26n_crack_ncnn_model')
+        self.declare_parameter('model_path', '/home/ubuntu/ros2_ws/src/yolo_seg_ros2/models/yolo26n-seg_ncnn_model')
         self.declare_parameter('conf_threshold', 0.25)
         self.declare_parameter('imgsz', 320)
         self.declare_parameter('process_fps', 5.0)
