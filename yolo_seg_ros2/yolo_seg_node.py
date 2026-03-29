@@ -4,24 +4,18 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 
 
-class YoloSegNode(Node):
+class ImageRelayNode(Node):
     def __init__(self):
         super().__init__('image_relay_node')
 
         self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
         self.declare_parameter('output_topic', '/yolo_result')
 
-        input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
-        output_topic = self.get_parameter('output_topic').get_parameter_value().string_value
+        input_topic = self.get_parameter('input_topic').value
+        output_topic = self.get_parameter('output_topic').value
 
-        sub_qos = QoSProfile(
+        qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-
-        pub_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
@@ -30,13 +24,13 @@ class YoloSegNode(Node):
             Image,
             input_topic,
             self.image_callback,
-            sub_qos
+            qos
         )
 
         self.publisher = self.create_publisher(
             Image,
             output_topic,
-            pub_qos
+            qos
         )
 
         self.get_logger().info(f'Relaying {input_topic} -> {output_topic}')
@@ -47,11 +41,11 @@ class YoloSegNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = YoloSegNode()
+    node = ImageRelayNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info('Shutting down yolo_seg_node...')
+        node.get_logger().info('Shutting down image_relay_node...')
     finally:
         node.destroy_node()
         rclpy.shutdown()
