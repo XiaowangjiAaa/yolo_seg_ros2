@@ -1,74 +1,69 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import numpy as np
 
 
-class ImageRelayNode(Node):
+class DepthVisualizer(Node):
     def __init__(self):
-        super().__init__('image_relay_node')
+        super().__init__('depth_visualizer')
 
-        self.declare_parameter('rgb_input', '/ascamera/camera_publisher/rgb0/image')
-        self.declare_parameter('depth_input', '/ascamera/camera_publisher/depth0/image_raw')
-        self.declare_parameter('rgb_output', '/rgb_relay')
-        self.declare_parameter('depth_output', '/depth_relay')
+        self.declare_parameter('input_topic', '/depth_relay')
+        self.declare_parameter('output_topic', '/depth_relay_vis')
+        self.declare_parameter('max_depth_mm', 5000.0)  # 5米内做显示映射
 
-        rgb_input = self.get_parameter('rgb_input').value
-        depth_input = self.get_parameter('depth_input').value
-        rgb_output = self.get_parameter('rgb_output').value
-        depth_output = self.get_parameter('depth_output').value
+        input_topic = self.get_parameter('input_topic').value
+        output_topic = self.get_parameter('output_topic').value
+        self.max_depth_mm = float(self.get_parameter('max_depth_mm').value)
 
-        # 订阅摄像头：按传感器常见方式
-        sub_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
+        self.bridge = CvBridge()
 
-        # 对外发布：更通用，兼容很多下游工具
-        pub_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
-
-        self.rgb_pub = self.create_publisher(Image, rgb_output, pub_qos)
-        self.depth_pub = self.create_publisher(Image, depth_output, pub_qos)
-
-        self.rgb_sub = self.create_subscription(
+        self.sub = self.create_subscription(
             Image,
-            rgb_input,
-            self.rgb_callback,
-            sub_qos
+            input_topic,
+            self.callback,
+            10
         )
-
-        self.depth_sub = self.create_subscription(
+        self.pub = self.create_publisher(
             Image,
-            depth_input,
-            self.depth_callback,
-            sub_qos
+            output_topic,
+            10
         )
 
-        self.get_logger().info(
-            f"Relaying:\n"
-            f"  RGB: {rgb_input} -> {rgb_output}\n"
-            f"  DEPTH: {depth_input} -> {depth_output}"
-        )
+        self.get_logger().info(f'Depth visualize: {input_topic} -> {output_topic}')
 
-    def rgb_callback(self, msg: Image):
-        self.rgb_pub.publish(msg)
+    def callback(self, msg: Image):
+        try:
+            depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
 
-    def depth_callback(self, msg: Image):
-        self.depth_pub.publish(msg)
+            depth = np.array(depth, dtype=np.float32)
+
+            # 无效值处理
+            depth[depth <= 0] = np.nan
+
+            # 限制显示范围
+            depth = np.clip(depth, 0, self.max_depth_mm)
+
+            # 归一化到 0~255
+            vis = (depth / self.max_depth_mm) * 255.0
+            vis = np.nan_to_num(vis, nan=0.0).astype(np.uint8)
+
+            out_msg = self.bridge.cv2_to_imgmsg(vis, encoding='mono8')
+            out_msg.header = msg.header
+            self.pub.publish(out_msg)
+
+        except Exception as e:
+            self.get_logger().error(f'Failed to visualize depth: {e}')
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ImageRelayNode()
+    node = DepthVisualizer()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info('Shutting down image_relay_node...')
+        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()
