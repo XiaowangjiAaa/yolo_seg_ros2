@@ -8,41 +8,52 @@ class ImageRelayNode(Node):
     def __init__(self):
         super().__init__('image_relay_node')
 
-        self.declare_parameter('input_topic', '/ascamera/camera_publisher/rgb0/image')
-        self.declare_parameter('output_topic', '/rgb_relay')
+        # topics
+        self.rgb_input = '/ascamera/camera_publisher/rgb0/image'
+        self.depth_input = '/ascamera/camera_publisher/depth0/image_raw'
 
-        input_topic = self.get_parameter('input_topic').value
-        output_topic = self.get_parameter('output_topic').value
+        self.rgb_output = '/rgb_relay'
+        self.depth_output = '/depth_relay'
 
-        sub_qos = QoSProfile(
+        qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
 
-        pub_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-
-        self.subscription = self.create_subscription(
+        # RGB
+        self.rgb_sub = self.create_subscription(
             Image,
-            input_topic,
-            self.image_callback,
-            sub_qos
+            self.rgb_input,
+            self.rgb_callback,
+            qos
         )
-
-        self.publisher = self.create_publisher(
+        self.rgb_pub = self.create_publisher(
             Image,
-            output_topic,
-            pub_qos
+            self.rgb_output,
+            qos
         )
 
-        self.get_logger().info(f'Relaying {input_topic} -> {output_topic}')
+        # Depth
+        self.depth_sub = self.create_subscription(
+            Image,
+            self.depth_input,
+            self.depth_callback,
+            qos
+        )
+        self.depth_pub = self.create_publisher(
+            Image,
+            self.depth_output,
+            qos
+        )
 
-    def image_callback(self, msg: Image):
-        self.publisher.publish(msg)
+        self.get_logger().info(f'Relaying:\n  RGB: {self.rgb_input} -> {self.rgb_output}\n  DEPTH: {self.depth_input} -> {self.depth_output}')
+
+    def rgb_callback(self, msg):
+        self.rgb_pub.publish(msg)
+
+    def depth_callback(self, msg):
+        self.depth_pub.publish(msg)
 
 
 def main(args=None):
@@ -51,7 +62,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info('Shutting down image_relay_node...')
+        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()
